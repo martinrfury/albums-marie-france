@@ -22,7 +22,7 @@ from scanphotos.ui import BG, CARD, GREEN, RED, TEXT, TEXT2, TEXT3, LINE, px
 CONSEIL = ("Conseil : écartez un peu plus les photos et, si elles sont claires, "
            "glissez une feuille de couleur derrière.")
 COL = 560  # largeur de la colonne centrale (avant mise à l'échelle)
-PRENOM = "Marie-France"
+PRENOM = "Pumba"
 APP_TITLE = f"Les albums de {PRENOM}"
 
 
