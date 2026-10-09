@@ -72,7 +72,17 @@ def download(url, size, progress=None):
     return dest
 
 
-def install_and_restart(new_exe):
+def clean_env():
+    """Environnement pour relancer le .exe : sans les variables internes de
+    PyInstaller héritées de l'instance actuelle (sinon le nouveau .exe cherche
+    son dossier _MEIxxxx, effacé à la fermeture -> « Failed to load Python DLL »)."""
+    env = {k: v for k, v in os.environ.items()
+           if not (k.startswith("_PYI") or k.startswith("_MEI"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
+def install_and_restart(new_exe, args=""):
     """Remplace le .exe après la fermeture du logiciel, puis le relance."""
     exe = sys.executable
     bat = os.path.join(tempfile.gettempdir(), "albums_maj.bat")
@@ -87,8 +97,9 @@ if errorlevel 1 (
   set /a n+=1
   if %n% lss 30 goto attente
 )
-start "" "{exe}"
+start "" "{exe}" {args}
 del "%~f0"
 """)
-    subprocess.Popen(["cmd", "/c", bat], creationflags=0x08000000)  # sans fenêtre
+    subprocess.Popen(["cmd", "/c", bat], creationflags=0x08000000,  # sans fenêtre
+                     env=clean_env())
     log.info("Mise à jour installée, redémarrage")

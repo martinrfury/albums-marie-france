@@ -514,6 +514,14 @@ def selftest():
 
 
 if __name__ == "__main__":
+    if "--test-maj" in sys.argv:
+        # Fabrication : rejoue une mise à jour complète (copie de soi-même en
+        # « nouvelle version », remplacement, relance) ; la relance fait l'autotest.
+        import shutil
+        nouveau = sys.executable + ".nouveau"
+        shutil.copy2(sys.executable, nouveau)
+        maj.install_and_restart(nouveau, args="--selftest")
+        sys.exit(0)
     if "--selftest" in sys.argv:
         import tempfile
         import traceback

@@ -26,6 +26,19 @@ jobs:
           $p = Start-Process -FilePath "dist\Les albums de Marie-France.exe" -ArgumentList "--selftest" -Wait -PassThru
           Get-Content "$env:TEMP\albums_selftest.txt"
           if ($p.ExitCode -ne 0) { exit 1 }
+      - name: Autotest de la mise à jour (remplacement + relance du .exe)
+        shell: pwsh
+        run: |
+          $f = "$env:TEMP\albums_selftest.txt"
+          Set-Content $f "EN ATTENTE"
+          $p = Start-Process -FilePath "dist\Les albums de Marie-France.exe" -ArgumentList "--test-maj" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { exit 1 }
+          for ($i = 0; $i -lt 120 -and (Get-Content $f -Raw).Trim() -eq "EN ATTENTE"; $i++) { Start-Sleep 1 }
+          Start-Sleep 2
+          $r = Get-Content $f -Raw
+          $r
+          if ($r.Trim() -ne "OK") { Write-Error "le .exe relancé n'a pas passé l'autotest"; exit 1 }
+          if (Test-Path "dist\Les albums de Marie-France.exe.nouveau") { Write-Error "remplacement non fait"; exit 1 }
       - uses: actions/upload-artifact@v4
         with:
           name: Albums-Marie-France-windows
