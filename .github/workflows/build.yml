@@ -1,0 +1,41 @@
+name: Construire le logiciel Windows
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt pyinstaller==6.11.1
+      - name: Numéro de version
+        shell: bash
+        run: echo "VERSION = ${{ github.run_number }}" > scanphotos/version.py
+      - name: Vérifier les modules
+        run: python -c "from scanphotos import detect, orient, scanner, album; import cv2; assert hasattr(cv2, 'FaceDetectorYN')"
+      - run: pyinstaller --noconfirm --onefile --windowed --name "Les albums de Marie-France" --add-data "scanphotos/models;scanphotos/models" --collect-submodules zeroconf --collect-submodules scanphotos app.py
+      - name: Autotest du .exe
+        shell: pwsh
+        run: |
+          $p = Start-Process -FilePath "dist\Les albums de Marie-France.exe" -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:TEMP\albums_selftest.txt"
+          if ($p.ExitCode -ne 0) { exit 1 }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Albums-Marie-France-windows
+          path: "dist/Les albums de Marie-France.exe"
+      - name: Publier la version (le logiciel de Marie-France la télécharge au lancement)
+        if: github.ref == 'refs/heads/main'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ github.run_number }}" "dist/Les albums de Marie-France.exe" \
+            --title "Version ${{ github.run_number }}" \
+            --notes "$(git log -1 --format=%B)"
