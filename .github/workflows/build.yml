@@ -28,11 +28,11 @@ jobs:
           if ($p.ExitCode -ne 0) { exit 1 }
       - name: Autotest de la mise à jour (remplacement + relance du .exe)
         shell: pwsh
+        timeout-minutes: 3  # un .exe relancé qui affiche une erreur bloque : échec net
         run: |
           $f = "$env:TEMP\albums_selftest.txt"
           Set-Content $f "EN ATTENTE"
-          $p = Start-Process -FilePath "dist\Les albums de Marie-France.exe" -ArgumentList "--test-maj" -Wait -PassThru
-          if ($p.ExitCode -ne 0) { exit 1 }
+          Start-Process -FilePath "dist\Les albums de Marie-France.exe" -ArgumentList "--test-maj"
           for ($i = 0; $i -lt 120 -and (Get-Content $f -Raw).Trim() -eq "EN ATTENTE"; $i++) { Start-Sleep 1 }
           Start-Sleep 2
           $r = Get-Content $f -Raw
