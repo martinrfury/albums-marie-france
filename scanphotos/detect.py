@@ -1,66 +1,127 @@
-"""Détourage de tirages posés sur fond blanc (capot du scanner), sans format imposé."""
-import numpy as np
+"""Détourage des tirages posés sur le capot blanc, quels que soient leurs formats.
+
+1. Graines : zones fermées par des contours nets (le cœur de chaque photo).
+2. Papier : contours faibles refermés largement, pour récupérer les bords blancs
+   (Polaroïd, marges) ; le capot, blanc pur et lisse, en est exclu.
+3. Chaque bloc de papier qui contient plusieurs graines (tirages posés bord à bord)
+   est coupé en ligne droite là où le bord du papier est le plus marqué.
+"""
 import cv2
+import numpy as np
 
-WORK = 1000  # hauteur de travail (px) pour la détection
-
-
-def photo_mask(small):
-    """Pixels qui ne sont pas du fond blanc : couleur, sombre, ou texturé."""
-    lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.float32)
-    # fond = mode des pixels très clairs du bord de l'image
-    border = np.concatenate([lab[:8].reshape(-1, 3), lab[-8:].reshape(-1, 3),
-                             lab[:, :8].reshape(-1, 3), lab[:, -8:].reshape(-1, 3)])
-    bg = np.median(border[border[:, 0] >= np.percentile(border[:, 0], 50)], axis=0)
-    dist = np.linalg.norm(lab - bg, axis=2)
-    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY).astype(np.float32)
-    mu = cv2.blur(gray, (7, 7))
-    std = np.sqrt(np.maximum(cv2.blur(gray * gray, (7, 7)) - mu * mu, 0))
-    m = ((dist > 10) | (std > 4)).astype(np.uint8) * 255
-    m = cv2.morphologyEx(m, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))
-    e = 10  # liseré sombre du bord de vitre : il relierait toutes les photos
-    m[:e] = 0; m[-e:] = 0; m[:, :e] = 0; m[:, -e:] = 0
-    m = cv2.morphologyEx(m, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))
-    # remplir les trous (ciels blancs à l'intérieur d'une photo)
-    cnts, _ = cv2.findContours(m, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    filled = np.zeros_like(m)
-    cv2.drawContours(filled, cnts, -1, 255, -1)
-    return filled
+H = 2000  # hauteur de travail (px)
 
 
-def split_concave(sub, min_area, depth=0):
-    """Coupe un bloc de tirages collés entre ses 2 coins rentrants les plus profonds."""
-    cs, _ = cv2.findContours(sub, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
-    cs = [c for c in cs if cv2.contourArea(c) > min_area]
-    out = []
-    for c in cs:
-        rect = cv2.minAreaRect(c)
-        if cv2.contourArea(c) / max(rect[1][0] * rect[1][1], 1) >= 0.9 or depth > 3:
-            out.append(rect); continue
-        d = cv2.convexityDefects(c, cv2.convexHull(c, returnPoints=False))
-        if d is None or len(d) < 2:
-            out.append(rect); continue
-        d = d.reshape(-1, 4)  # (N,1,4) en OpenCV 4, (N,4) en OpenCV 5
-        d = d[np.argsort(-d[:, 3])][:2]
-        c = c.reshape(-1, 2)
-        p1 = tuple(int(v) for v in c[d[0][2]]); p2 = tuple(int(v) for v in c[d[1][2]])
-        one = np.zeros_like(sub); cv2.drawContours(one, [c.reshape(-1, 1, 2)], -1, 255, -1)
-        cv2.line(one, p1, p2, 0, 5)
-        out += split_concave(one, min_area, depth + 1)
-    return out
+def _k(n):
+    return np.ones((n, n), np.uint8)
 
 
-def rects_from_mask(m, min_frac=0.02):
-    return split_concave(m, min_frac * m.shape[0] * m.shape[1])
+def _fill_closed(e, open_k=15):
+    """Zones entièrement entourées de contours (le fond touche les bords de l'image)."""
+    inv = (e == 0).astype(np.uint8)
+    _, lab = cv2.connectedComponents(inv, connectivity=4)
+    border = set(np.unique(np.concatenate([lab[0], lab[-1], lab[:, 0], lab[:, -1]])))
+    reg = (~np.isin(lab, list(border - {0}))).astype(np.uint8) * 255
+    return cv2.morphologyEx(reg, cv2.MORPH_OPEN, _k(open_k))
 
 
-def crop(img, rect, scale, inset=15):
-    """Redresse le rectangle par ses 4 coins (indépendant de la convention
-    d'angle d'OpenCV) ; le haut de la photo reste le haut du scan."""
-    pts = cv2.boxPoints(rect) * scale
-    s, d = pts.sum(1), np.diff(pts, axis=1).ravel()
-    tl, br = pts[np.argmin(s)], pts[np.argmax(s)]
-    tr, bl = pts[np.argmin(d)], pts[np.argmax(d)]
+def _comps(reg, min_area):
+    cs, _ = cv2.findContours(reg, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    return [c for c in cs if cv2.contourArea(c) > min_area]
+
+
+def _split_block(block, boxes, edges):
+    """Coupe droite récursive d'un bloc de papier entre groupes de graines."""
+    if len(boxes) <= 1:
+        return [block]
+    best = None
+    for axis in (0, 1):  # 0 : coupe horizontale, 1 : verticale
+        lo_i, hi_i = (1, 3) if axis == 0 else (0, 2)
+        order = sorted(boxes, key=lambda b: b[lo_i])
+        prof = ((edges > 0) & block).sum(axis=1 - axis).astype(float)
+        span = block.sum(axis=1 - axis).astype(float)
+        frac = np.convolve(prof / np.maximum(span, 1), np.ones(3) / 3, "same")
+        for n in range(1, len(order)):
+            a, b = order[:n], order[n:]
+            g0, g1 = max(x[hi_i] for x in a), min(x[lo_i] for x in b)
+            if g1 - g0 < 2:
+                continue
+            pos = max(range(g0 + 1, g1), key=lambda p: frac[p])
+            if best is None or frac[pos] > best[0]:
+                best = (frac[pos], axis, pos, a, b)
+    if best is None:
+        return [block]
+    _, axis, pos, a, b = best
+    m1, m2 = block.copy(), block.copy()
+    if axis == 0:
+        m1[pos:] = False
+        m2[:pos + 1] = False
+    else:
+        m1[:, pos:] = False
+        m2[:, :pos + 1] = False
+    return _split_block(m1, a, edges) + _split_block(m2, b, edges)
+
+
+def order_quad(pts):
+    """4 points -> ordre haut-gauche, haut-droit, bas-droit, bas-gauche."""
+    p = np.asarray(pts, np.float32)
+    c = p.mean(0)
+    p = p[np.argsort(np.arctan2(p[:, 1] - c[1], p[:, 0] - c[0]))]
+    return np.roll(p, -int(np.argmin(p.sum(1))), axis=0)
+
+
+def find_quads(img):
+    """Image BGR d'une planche -> liste des 4 coins (px de l'image) de chaque photo,
+    triée haut -> bas puis gauche -> droite."""
+    s = img.shape[0] / H
+    sm = cv2.resize(img, (round(img.shape[1] / s), H), interpolation=cv2.INTER_AREA)
+    g = cv2.GaussianBlur(cv2.cvtColor(sm, cv2.COLOR_BGR2GRAY), (3, 3), 0)
+    min_area = 0.01 * g.size
+
+    # capot : quasi blanc pur et lisse (L >= 244) ; le papier, même blanc, est plus terne
+    L = cv2.cvtColor(sm, cv2.COLOR_BGR2LAB)[..., 0].astype(np.float32)
+    mu = cv2.blur(L, (9, 9))
+    std = np.sqrt(np.maximum(cv2.blur(L * L, (9, 9)) - mu * mu, 0))
+    lid = cv2.morphologyEx(((mu >= 244) & (std < 3)).astype(np.uint8),
+                           cv2.MORPH_OPEN, _k(7)) > 0
+    lid[:8] = lid[-8:] = True          # liseré sombre des bords de la vitre :
+    lid[:, :8] = lid[:, -8:] = True    # il relierait toutes les photos
+
+    e1 = cv2.dilate(cv2.morphologyEx(cv2.Canny(g, 15, 40), cv2.MORPH_CLOSE, _k(5)), _k(3))
+    sreg = _fill_closed(e1)
+    sreg[lid] = 0
+    seeds = _comps(cv2.morphologyEx(sreg, cv2.MORPH_OPEN, _k(15)), min_area)
+
+    weak = cv2.Canny(g, 6, 18)
+    paper = _fill_closed(cv2.morphologyEx(weak, cv2.MORPH_CLOSE, _k(21)), 21)
+    paper[lid] = 0
+    paper = cv2.morphologyEx(paper, cv2.MORPH_OPEN, _k(15))
+    for c in seeds:
+        cv2.drawContours(paper, [c], -1, 255, -1)
+
+    n, comp = cv2.connectedComponents(paper)
+    boxes = []
+    for c in seeds:
+        x, y, w, h = cv2.boundingRect(c)
+        boxes.append((x, y, x + w, y + h, comp[y + h // 2, x + w // 2]))
+    quads = []
+    for lab in range(1, n):
+        mine = [b[:4] for b in boxes if b[4] == lab]
+        if not mine:
+            continue
+        for part in _split_block(comp == lab, mine, weak):
+            m = cv2.morphologyEx(part.astype(np.uint8) * 255, cv2.MORPH_OPEN, _k(9))
+            cs = _comps(m, min_area)
+            if cs:
+                quads.append(order_quad(cv2.boxPoints(cv2.minAreaRect(
+                    max(cs, key=cv2.contourArea))) * s))
+    quads.sort(key=lambda q: (round(q[:, 1].min() / (img.shape[0] / 8)), q[:, 0].min()))
+    return quads
+
+
+def crop_quad(img, quad, inset=4):
+    """Redresse la photo délimitée par 4 coins (ordre quelconque)."""
+    tl, tr, br, bl = order_quad(quad)
     w = int(round((np.linalg.norm(tr - tl) + np.linalg.norm(br - bl)) / 2)) - 2 * inset
     h = int(round((np.linalg.norm(bl - tl) + np.linalg.norm(br - tr)) / 2)) - 2 * inset
     src = np.float32([tl, tr, br, bl])
@@ -72,9 +133,5 @@ def crop(img, rect, scale, inset=15):
 
 
 def split_photos(img):
-    """Image BGR d'une planche -> liste des photos détourées (haut->bas, gauche->droite)."""
-    scale = img.shape[0] / WORK
-    small = cv2.resize(img, (round(img.shape[1] / scale), WORK), interpolation=cv2.INTER_AREA)
-    rects = rects_from_mask(photo_mask(small))
-    rects.sort(key=lambda r: (round(r[0][1] / 150), r[0][0]))
-    return [crop(img, r, scale) for r in rects]
+    """Image BGR d'une planche -> liste des photos détourées."""
+    return [crop_quad(img, q) for q in find_quads(img)]

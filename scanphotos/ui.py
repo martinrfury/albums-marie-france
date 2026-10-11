@@ -206,3 +206,131 @@ def badge(parent, text, size, fill, fg="white", font=None, bg=CARD):
                  font=font)
     l.img = im
     return l
+
+
+class CornerPicker(tk.Canvas):
+    """Planche affichée en entier ; l'utilisatrice clique les 4 coins d'une photo.
+    Une loupe suit la souris pour viser précisément ; les coins posés restent
+    déplaçables à la souris. on_change(n) est appelé quand le nombre de coins change."""
+
+    LOUPE = 170      # côté de la loupe (px écran, avant mise à l'échelle)
+    ZOOM = 4         # grossissement de la loupe par rapport à l'affichage
+
+    def __init__(self, parent, img_bgr, max_w, max_h, boxes=(), on_change=None, bg=BG):
+        import cv2
+        self.cv2 = cv2
+        self.full = img_bgr
+        h, w = img_bgr.shape[:2]
+        self.k = min(max_w / w, max_h / h)          # échelle affichage / image
+        self.dw, self.dh = int(w * self.k), int(h * self.k)
+        super().__init__(parent, width=self.dw, height=self.dh, bg=bg, bd=0,
+                         highlightthickness=0, cursor="crosshair")
+        rgb = cv2.cvtColor(cv2.resize(img_bgr, (self.dw, self.dh), interpolation=cv2.INTER_AREA),
+                           cv2.COLOR_BGR2RGB)
+        self.base = ImageTk.PhotoImage(Image.fromarray(rgb))
+        self.create_image(0, 0, image=self.base, anchor="nw")
+        for b in boxes:  # cadres déjà détectés, en discret
+            self.create_polygon([c * self.k for p in b for c in p], outline="#c7c7cc",
+                                fill="", width=1, dash=(4, 3))
+        self.pts, self.drag, self.on_change = [], None, on_change
+        self.ls = px(self.LOUPE)
+        self.bind("<Motion>", self._move)
+        self.bind("<Leave>", lambda _: self.delete("loupe"))
+        self.bind("<ButtonPress-1>", self._press)
+        self.bind("<B1-Motion>", self._drag)
+        self.bind("<ButtonRelease-1>", lambda _: setattr(self, "drag", None))
+
+    # --- coins ---
+    def _near(self, x, y):
+        for i, (px_, py_) in enumerate(self.pts):
+            if (px_ - x) ** 2 + (py_ - y) ** 2 <= px(12) ** 2:
+                return i
+        return None
+
+    def _press(self, e):
+        i = self._near(e.x, e.y)
+        if i is not None:
+            self.drag = i
+        elif len(self.pts) < 4:
+            self.pts.append((e.x, e.y))
+            self._redraw()
+            if self.on_change:
+                self.on_change(len(self.pts))
+        self._loupe(e.x, e.y)
+
+    def _drag(self, e):
+        if self.drag is not None:
+            x = min(max(e.x, 0), self.dw - 1); y = min(max(e.y, 0), self.dh - 1)
+            self.pts[self.drag] = (x, y)
+            self._redraw()
+            self._loupe(x, y)
+
+    def _move(self, e):
+        self._loupe(e.x, e.y)
+        self.config(cursor="fleur" if self._near(e.x, e.y) is not None else "crosshair")
+
+    def reset(self):
+        self.pts = []
+        self._redraw()
+        if self.on_change:
+            self.on_change(0)
+
+    def _ordered(self):
+        """Coins dans l'ordre haut-gauche, haut-droit, bas-droit, bas-gauche."""
+        import numpy as np
+        p = np.array(self.pts, float)
+        c = p.mean(0)
+        ang = np.arctan2(p[:, 1] - c[1], p[:, 0] - c[0])
+        p = p[np.argsort(ang)]                     # tri autour du centre
+        start = np.argmin(p.sum(1))                # le plus haut-gauche d'abord
+        return np.roll(p, -start, axis=0)
+
+    def _redraw(self):
+        self.delete("sel")
+        if len(self.pts) == 4:
+            q = self._ordered()
+            self.create_polygon([c for p in q for c in p], outline=BLUE, fill="",
+                                width=px(2), tags="sel")
+        elif len(self.pts) > 1:
+            self.create_line([c for p in self.pts for c in p], fill=BLUE, width=px(2),
+                             dash=(6, 4), tags="sel")
+        r = px(7)
+        for i, (x, y) in enumerate(self.pts):
+            self.create_oval(x - r, y - r, x + r, y + r, fill="white", outline=BLUE,
+                             width=px(2), tags="sel")
+
+    def quad_full(self):
+        """Les 4 coins ordonnés, en pixels de l'image d'origine."""
+        return self._ordered() / self.k
+
+    # --- loupe ---
+    def _loupe(self, x, y):
+        self.delete("loupe")
+        cv2 = self.cv2
+        half = self.ls / (2 * self.ZOOM * self.k)   # demi-côté de la zone, en px image
+        fx, fy = x / self.k, y / self.k
+        h, w = self.full.shape[:2]
+        x0, y0 = int(fx - half), int(fy - half)
+        x1, y1 = int(fx + half), int(fy + half)
+        pad = [max(0, -y0), max(0, y1 - h), max(0, -x0), max(0, x1 - w)]
+        crop = self.full[max(0, y0):min(h, y1), max(0, x0):min(w, x1)]
+        if crop.size == 0:
+            return
+        crop = cv2.copyMakeBorder(crop, *pad, cv2.BORDER_CONSTANT, value=(245, 245, 247))
+        crop = cv2.cvtColor(cv2.resize(crop, (self.ls, self.ls),
+                                       interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
+        im = Image.fromarray(crop)
+        d = ImageDraw.Draw(im)
+        c = self.ls // 2
+        for off in (-1, 1):  # croix de visée, contour blanc + trait bleu
+            d.line((c + off, 0, c + off, self.ls), fill="white")
+            d.line((0, c + off, self.ls, c + off), fill="white")
+        d.line((c, 0, c, self.ls), fill=_hex(BLUE))
+        d.line((0, c, self.ls, c), fill=_hex(BLUE))
+        d.rectangle((0, 0, self.ls - 1, self.ls - 1), outline=_hex(TEXT), width=2)
+        self.loupe_img = ImageTk.PhotoImage(im)
+        # la loupe se place en haut à droite du curseur, ou de l'autre côté près des bords
+        g = px(24)
+        lx = x + g if x + g + self.ls < self.dw else x - g - self.ls
+        ly = y - g - self.ls if y - g - self.ls > 0 else y + g
+        self.create_image(lx, ly, image=self.loupe_img, anchor="nw", tags="loupe")

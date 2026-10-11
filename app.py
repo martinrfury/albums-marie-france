@@ -455,6 +455,36 @@ class App(tk.Tk):
             self.album.undo_last()
             self.screen_prepare(tip=CONSEIL)
 
+    # ---------- écran 3 bis : recadrage manuel (4 coins + loupe) ----------
+    def screen_recrop(self, scan_path, quads, title, on_done, on_cancel):
+        """Elle clique les 4 coins de la photo sur la planche ; on_done(coins)."""
+        col = self.new_page()
+        self.caption(col)
+        self.text(col, title, "large", pady=(0, px(4)))
+        self.text(col, "Cliquez les 4 coins de la photo. La loupe vous aide à viser ; "
+                       "un coin posé peut être déplacé.", "body", TEXT2, pady=(0, px(12)))
+        img = alb.read_image(scan_path)
+        max_h = max(px(360), self.winfo_screenheight() - px(330))
+        if self.winfo_height() < max_h + px(300):
+            self.geometry(f"{self.winfo_width()}x{min(self.winfo_screenheight() - px(60), max_h + px(300))}")
+        state = tk.Label(col, text="Coins posés : 0 sur 4", font=self.F["small"], fg=TEXT3,
+                         bg=BG, anchor="w")
+        ok = self.pill(col, "Valider ce cadre", lambda: on_done(picker.quad_full()), full=True)
+
+        def changed(n):
+            state.config(text=f"Coins posés : {n} sur 4")
+            ok.set_enabled(n == 4)
+
+        picker = ui.CornerPicker(col, img, self.col, max_h, boxes=quads, on_change=changed)
+        picker.pack(pady=(0, px(8)))
+        state.pack(fill="x", pady=(0, px(10)))
+        ok.pack(pady=(0, px(10)))
+        ok.set_enabled(False)
+        row = tk.Frame(col, bg=BG)
+        row.pack()
+        self.pill(row, "Recommencer", picker.reset, kind="secondary").pack(side="left", padx=px(6))
+        self.pill(row, "Annuler", on_cancel, kind="secondary").pack(side="left", padx=px(6))
+
     # ---------- écran 4 : fin ----------
     def screen_done(self):
         col = self.new_page()
