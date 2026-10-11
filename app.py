@@ -308,11 +308,10 @@ class App(tk.Tk):
             self.screen_root()
             return
         self.album = alb.Album(self.cfg["root"], name)
-        self.misses = 0  # scans successifs sans aucune photo trouvée
         self.screen_prepare()
 
     # ---------- écran 2 : préparer la planche ----------
-    def screen_prepare(self, error=None, tip=None, offer_keep=False):
+    def screen_prepare(self, error=None, tip=None):
         col = self.new_page()
         self.caption(col)
         self.text(col, "Posez vos photos", "large", pady=(0, px(20)))
@@ -337,9 +336,6 @@ class App(tk.Tk):
         self.activity = ui.Activity(col, self.col)
         self.hint = self.text(col, "Environ 40 secondes", "small", TEXT3)
         self.hint.config(anchor="center", justify="center")
-        if offer_keep:
-            self.pill(col, "Garder le scan tel quel", self.keep_whole, kind="secondary",
-                      full=True).pack(pady=(px(14), 0))
         end = tk.Frame(col, bg=BG)
         end.pack(fill="x", pady=(px(24), 0))
         if self.album.count():
@@ -360,11 +356,8 @@ class App(tk.Tk):
         album, url = self.album, self.scanner_url
 
         def work():
-            raw = scanner.scan(url)
-            path = album.save_scan(raw)
-            img = alb.read_image(path)
-            photos = [orient.upright(p) for p in detect.split_photos(img)]
-            return album.add_photos(photos) if photos else []
+            path = album.save_scan(scanner.scan(url))
+            return path, detect.find_quads(alb.read_image(path))
 
         self.run_bg(work, self.scan_done)
 
@@ -378,45 +371,108 @@ class App(tk.Tk):
             self.screen_prepare(str(res))
         elif isinstance(res, Exception):
             self.screen_prepare(f"Un problème est survenu : {res}")
-        elif not res:
-            self.misses += 1
-            log.info("Scan sans photo trouvée (%s de suite)", self.misses)
-            self.screen_prepare("Aucune photo trouvée sur la vitre.", tip=CONSEIL,
-                                offer_keep=self.misses >= 2)
         else:
-            self.misses = 0
-            log.info("Scan : %s photo(s) dans « %s »", len(res), self.album.name)
+            path, quads = res
+            log.info("Scan : %s cadre(s) proposé(s) dans « %s »", len(quads), self.album.name)
+            self.screen_check(path, quads)
+
+    # ---------- écran 3 : vérifier les cadres de la planche ----------
+    def screen_check(self, scan_path, quads):
+        """La planche avec un cadre par photo (4 coins déplaçables, loupe) ; elle
+        ajuste, ajoute ou supprime des cadres, puis valide la planche entière.
+        Deux colonnes pour que les boutons restent visibles sur tout écran."""
+        if self.page:
+            self.page.destroy()
+        page = tk.Frame(self, bg=BG)
+        page.pack(fill="both", expand=True)
+        self.page = page
+        self.check = (scan_path, quads)  # pour « Corriger les cadres » ensuite
+        img = alb.read_image(scan_path)
+        side = px(300)
+        avail_h = self.winfo_screenheight() - px(150)  # barre de titre, barre des tâches
+        avail_w = self.winfo_screenwidth() - px(80)
+        self.geometry(f"{avail_w}x{avail_h}+{px(20)}+{px(20)}")
+
+        left = tk.Frame(page, bg=BG)
+        right = tk.Frame(page, bg=BG, width=side)
+        left.pack(side="left", fill="y", padx=(px(32), px(24)), pady=px(24))
+        right.pack(side="left", fill="y", pady=px(32))
+        count = tk.Label(right, font=self.F["title"], fg=TEXT, bg=BG, anchor="w")
+        ok = ui.Pill(right, "Valider la planche", lambda: self.validate_planche(editor),
+                     self.F["btn"], width=side, bg=BG)
+
+        def changed():
+            n = len(editor.quads)
+            count.config(text=plural(n, "photo") if n else "Aucune photo")
+            ok.set_enabled(n > 0)
+
+        editor = ui.FrameEditor(left, img, avail_w - side - px(96), avail_h - px(48),
+                                quads=quads, on_change=changed)
+        editor.pack(anchor="n")
+
+        n = self.album.count()
+        tk.Label(right, text=f"{self.album.name}  ·  {plural(n, 'photo')}", font=self.F["small"],
+                 fg=TEXT3, bg=BG, anchor="w").pack(fill="x", pady=(0, px(6)))
+        tk.Label(right, text="Vérifiez les cadres", font=self.F["large"], fg=TEXT, bg=BG,
+                 anchor="w").pack(fill="x", pady=(0, px(10)))
+        intro = ("Chaque photo a un cadre. Déplacez un coin pour l'ajuster ; la loupe "
+                 "vous aide à viser." if quads else
+                 "Aucune photo trouvée automatiquement. Ajoutez un cadre par photo, puis "
+                 "placez ses 4 coins.")
+        tk.Label(right, text=intro, font=self.F["body"], fg=TEXT2, bg=BG, anchor="w",
+                 justify="left", wraplength=side).pack(fill="x", pady=(0, px(16)))
+        count.pack(fill="x", pady=(0, px(12)))
+        ok.pack(pady=(0, px(10)))
+        ui.Pill(right, "+  Ajouter un cadre", editor.add_frame, self.F["body"],
+                kind="secondary", width=side).pack(pady=(0, px(10)))
+        ui.Pill(right, "Supprimer le cadre sélectionné", editor.delete_selected, self.F["body"],
+                kind="secondary", width=side).pack(pady=(0, px(18)))
+        tk.Label(right, text="Deux photos dans un même cadre ? Réduisez-le sur la première "
+                             "et ajoutez un cadre pour la seconde.", font=self.F["small"],
+                 fg=TEXT3, bg=BG, anchor="w", justify="left",
+                 wraplength=side).pack(fill="x", pady=(0, px(18)))
+        ui.Pill(right, "Refaire le scan", lambda: self.screen_prepare(tip=CONSEIL),
+                self.F["body"], kind="link", bg=BG).pack(anchor="w")
+        changed()
+
+    def validate_planche(self, editor):
+        scan_path, quads = self.check[0], editor.quads_full()
+        self.check = (scan_path, quads)
+        album = self.album
+
+        def work():
+            img = alb.read_image(scan_path)
+            return album.add_photos([orient.upright(detect.crop_quad(img, q)) for q in quads])
+
+        def done(res):
+            if isinstance(res, Exception):
+                messagebox.showerror(APP_TITLE, f"Un problème est survenu : {res}")
+                return
+            log.info("Planche validée : %s photo(s) dans « %s »", len(res), album.name)
             self.screen_result(res)
 
-    def keep_whole(self):
-        """Détourage raté : la planche entière va dans l'album, à redécouper plus tard."""
-        self.misses = 0
-        log.info("Planche gardée entière (détourage raté) dans « %s »", self.album.name)
-        self.screen_result([self.album.keep_whole_scan()], planche=True)
+        self.run_bg(work, done)
 
-    # ---------- écran 3 : résultat ----------
-    def screen_result(self, files, planche=False):
+    # ---------- écran 4 : résultat ----------
+    def screen_result(self, files):
         col = self.new_page()
         self.caption(col)
         head = tk.Frame(col, bg=BG)
         head.pack(fill="x", pady=(0, px(20)))
         ui.badge(head, "✓", px(34), GREEN, font=self.F["bodyb"], bg=BG).pack(side="left")
-        title = ("Scan gardé tel quel" if planche else
-                 plural(len(files), "photo") + (" ajoutées" if len(files) > 1 else " ajoutée"))
-        tk.Label(head, text=title, font=self.F["large"], fg=TEXT, bg=BG
+        tk.Label(head, text=plural(len(files), "photo") + (" ajoutées" if len(files) > 1
+                 else " ajoutée"), font=self.F["large"], fg=TEXT, bg=BG
                  ).pack(side="left", padx=(px(12), 0))
-        if planche:
-            self.text(col, "La planche entière est dans l'album. Elle pourra être découpée "
-                           "plus tard.", "body", TEXT2, pady=(0, px(16)))
-
         card = ui.Card(col, self.col, pad=16)
         card.pack(pady=(0, px(22)))
         grid = tk.Frame(card.inner, bg=CARD)
         grid.pack()
-        size = (self.col - px(32) - px(12) * (len(files) - 1)) // max(len(files), 3)
+        per_row = min(len(files), 4)
+        size = (self.col - px(32) - px(12) * (per_row - 1)) // max(per_row, 3)
         for i, p in enumerate(files):
             cell = tk.Frame(grid, bg=CARD)
-            cell.grid(row=0, column=i, padx=(0 if i == 0 else px(12), 0), sticky="n")
+            cell.grid(row=i // 4, column=i % 4, padx=(0 if i % 4 == 0 else px(12), 0),
+                      pady=(0, px(10)), sticky="n")
             box = tk.Frame(cell, bg=CARD, width=size, height=size)
             box.pack()
             box.pack_propagate(False)
@@ -425,18 +481,14 @@ class App(tk.Tk):
             self._set_thumb(img_lbl, p, size)
             ui.Pill(cell, "↻  Tourner", lambda p=p, l=img_lbl, s=size: self.rotate(p, l, s),
                     self.F["small"], kind="link", bg=CARD).pack(pady=(px(6), 0))
-
         self.pill(col, "Planche suivante", self.screen_prepare, full=True
                   ).pack(pady=(0, px(12)))
         row = tk.Frame(col, bg=BG)
         row.pack()
-        self.pill(row, "Refaire ce scan", self.redo, kind="secondary").pack(side="left",
-                                                                            padx=px(6))
+        self.pill(row, "Corriger les cadres", self.fix_frames, kind="secondary"
+                  ).pack(side="left", padx=px(6))
         self.pill(row, "Terminer l'album", self.screen_done, kind="secondary"
                   ).pack(side="left", padx=px(6))
-        if not planche:
-            ui.Pill(col, "Les photos sont mal découpées", self.keep_whole, self.F["body"],
-                    kind="link").pack(pady=(px(16), 0))
 
     def _set_thumb(self, lbl, path, size):
         im = Image.fromarray(cv2.cvtColor(alb.read_image(path), cv2.COLOR_BGR2RGB))
@@ -449,65 +501,13 @@ class App(tk.Tk):
         self.album.rotate(path)
         self._set_thumb(lbl, path, size)
 
-    def redo(self):
-        if messagebox.askyesno(APP_TITLE, "Retirer les photos de cette planche et "
-                                              "la scanner à nouveau ?"):
-            self.album.undo_last()
-            self.screen_prepare(tip=CONSEIL)
+    def fix_frames(self):
+        """Retour à la planche : les photos de la planche vont à la corbeille et les
+        cadres validés sont reproposés tels quels."""
+        self.album.undo_last()
+        self.screen_check(*self.check)
 
-    # ---------- écran 3 bis : recadrage manuel (4 coins + loupe) ----------
-    def screen_recrop(self, scan_path, quads, title, on_done, on_cancel):
-        """Elle clique les 4 coins de la photo sur la planche ; on_done(coins).
-        Deux colonnes (planche à gauche, consignes et boutons à droite) pour que
-        les boutons restent visibles quelle que soit la hauteur de l'écran."""
-        if self.page:
-            self.page.destroy()
-        page = tk.Frame(self, bg=BG)
-        page.pack(fill="both", expand=True)
-        self.page = page
-        img = alb.read_image(scan_path)
-        side = px(300)
-        # la fenêtre occupe l'écran sans le dépasser (barre de titre, barre des tâches)
-        avail_h = self.winfo_screenheight() - px(150)
-        avail_w = self.winfo_screenwidth() - px(80)
-        max_h = avail_h - px(48)
-        max_w = avail_w - side - px(96)
-        self.geometry(f"{avail_w}x{avail_h}+{px(20)}+{px(20)}")
-
-        right = tk.Frame(page, bg=BG, width=side)
-        left = tk.Frame(page, bg=BG)
-        left.pack(side="left", fill="y", padx=(px(32), px(24)), pady=px(24))
-        right.pack(side="left", fill="y", pady=px(32))
-        state = tk.Label(right, text="Coins posés : 0 sur 4", font=self.F["body"], fg=TEXT2,
-                         bg=BG, anchor="w")
-        ok = ui.Pill(right, "Valider ce cadre", lambda: on_done(picker.quad_full()),
-                     self.F["btn"], width=side, bg=BG)
-
-        def changed(n):
-            state.config(text=f"Coins posés : {n} sur 4")
-            ok.set_enabled(n == 4)
-
-        picker = ui.CornerPicker(left, img, max_w, max_h, boxes=quads, on_change=changed)
-        picker.pack(anchor="n")
-
-        n = self.album.count()
-        tk.Label(right, text=f"{self.album.name}  ·  {plural(n, 'photo')}", font=self.F["small"],
-                 fg=TEXT3, bg=BG, anchor="w").pack(fill="x", pady=(0, px(6)))
-        tk.Label(right, text=title, font=self.F["title"], fg=TEXT, bg=BG, anchor="w",
-                 justify="left", wraplength=side).pack(fill="x", pady=(0, px(10)))
-        tk.Label(right, text="Cliquez les 4 coins de la photo.\n\nLa loupe vous aide à "
-                             "viser. Un coin posé peut être déplacé.",
-                 font=self.F["body"], fg=TEXT2, bg=BG, anchor="w", justify="left",
-                 wraplength=side).pack(fill="x", pady=(0, px(20)))
-        state.pack(fill="x", pady=(0, px(12)))
-        ok.pack(pady=(0, px(10)))
-        ok.set_enabled(False)
-        ui.Pill(right, "Recommencer", picker.reset, self.F["body"], kind="secondary",
-                width=side).pack(pady=(0, px(10)))
-        ui.Pill(right, "Annuler", on_cancel, self.F["body"], kind="secondary",
-                width=side).pack()
-
-    # ---------- écran 4 : fin ----------
+    # ---------- écran 5 : fin ----------
     def screen_done(self):
         col = self.new_page()
         n = self.album.count()
@@ -547,21 +547,36 @@ def selftest():
     app.start_album()
     album = app.album
     ok, buf = cv2.imencode(".jpg", planche)
-    album.save_scan(buf.tobytes())
-    files = album.add_photos(photos)
-    app.scan_done([])
-    app.scan_done([])                                # 2e échec : « Garder le scan tel quel »
-    app.scan_done(files)
+    scan = album.save_scan(buf.tobytes())
+    app.run_bg = lambda fn, done: done(fn())         # tâches de fond en direct pour le test
+
+    def editor():
+        def walk(w):
+            for c in w.winfo_children():
+                yield c
+                yield from walk(c)
+        return next(w for w in walk(app.page) if isinstance(w, ui.FrameEditor))
+
+    app.scan_done((scan, []))                        # rien trouvé : écran vide
+    assert len(editor().quads) == 0
+    app.scan_done((scan, detect.find_quads(planche)))
+    ed = editor()
+    assert len(ed.quads) == 2, f"cadres : {len(ed.quads)} au lieu de 2"
+    ed.add_frame()                                   # « Ajouter un cadre »
+    ed._loupe(10, 10)                                # loupe au bord
+    ed.delete_selected()                             # puis le supprimer
+    app.validate_planche(ed)
+    files = album.last
+    assert album.count() == 2, f"album : {album.count()} fichier(s) au lieu de 2"
     app.rotate(files[0], tk.Label(app), 100)
-    app.keep_whole()                                 # « mal découpées »
+    app.fix_frames()                                 # « Corriger les cadres »
+    assert album.count() == 0 and len(os.listdir(os.path.join(album.hidden, "corbeille"))) == 2
+    app.validate_planche(editor())
+    assert album.count() == 2
     app.screen_done()
-    run_bg, app.run_bg = app.run_bg, lambda *a: None
+    app.run_bg = lambda *a: None
     app.screen_update((VERSION + 1, "https://example.invalid/x.exe", 1))  # écran seul
-    app.run_bg = run_bg
     app.update()
-    assert album.count() == 1, f"album : {album.count()} fichier(s) au lieu de 1"
-    assert any(f.endswith("- planche.jpg") for f in os.listdir(album.dir))
-    assert len(os.listdir(os.path.join(album.hidden, "corbeille"))) == 2
     app.destroy()
 
 

@@ -208,17 +208,18 @@ def badge(parent, text, size, fill, fg="white", font=None, bg=CARD):
     return l
 
 
-class CornerPicker(tk.Canvas):
-    """Planche affichée en entier ; l'utilisatrice clique les 4 coins d'une photo.
-    Une loupe suit la souris pour viser précisément ; les coins posés restent
-    déplaçables à la souris. on_change(n) est appelé quand le nombre de coins change."""
+class FrameEditor(tk.Canvas):
+    """Planche affichée en entier avec un cadre par photo. Chaque cadre a 4 coins
+    déplaçables ; une loupe suit la souris pour viser. Un clic dans un cadre le
+    sélectionne. on_change() est appelé à chaque modification."""
 
     LOUPE = 170      # côté de la loupe (px écran, avant mise à l'échelle)
     ZOOM = 4         # grossissement de la loupe par rapport à l'affichage
 
-    def __init__(self, parent, img_bgr, max_w, max_h, boxes=(), on_change=None, bg=BG):
+    def __init__(self, parent, img_bgr, max_w, max_h, quads=(), on_change=None, bg=BG):
         import cv2
-        self.cv2 = cv2
+        import numpy as np
+        self.cv2, self.np = cv2, np
         self.full = img_bgr
         h, w = img_bgr.shape[:2]
         self.k = min(max_w / w, max_h / h)          # échelle affichage / image
@@ -229,79 +230,109 @@ class CornerPicker(tk.Canvas):
                            cv2.COLOR_BGR2RGB)
         self.base = ImageTk.PhotoImage(Image.fromarray(rgb))
         self.create_image(0, 0, image=self.base, anchor="nw")
-        for b in boxes:  # cadres déjà détectés, en discret
-            self.create_polygon([c * self.k for p in b for c in p], outline="#c7c7cc",
-                                fill="", width=1, dash=(4, 3))
-        self.pts, self.drag, self.on_change = [], None, on_change
+        self.quads = [[(float(x) * self.k, float(y) * self.k) for x, y in q] for q in quads]
+        self.sel = 0 if self.quads else None
+        self.drag = None
+        self.on_change = on_change
         self.ls = px(self.LOUPE)
         self.bind("<Motion>", self._move)
         self.bind("<Leave>", lambda _: self.delete("loupe"))
         self.bind("<ButtonPress-1>", self._press)
         self.bind("<B1-Motion>", self._drag)
         self.bind("<ButtonRelease-1>", lambda _: setattr(self, "drag", None))
+        self._redraw()
 
-    # --- coins ---
+    # --- cadres ---
     def _near(self, x, y):
-        for i, (px_, py_) in enumerate(self.pts):
-            if (px_ - x) ** 2 + (py_ - y) ** 2 <= px(12) ** 2:
+        """(cadre, coin) le plus proche du pointeur, priorité au cadre sélectionné."""
+        best, r2 = None, px(14) ** 2
+        order = ([self.sel] if self.sel is not None else []) + \
+                [i for i in range(len(self.quads)) if i != self.sel]
+        for i in order:
+            for j, (cx, cy) in enumerate(self.quads[i]):
+                d = (cx - x) ** 2 + (cy - y) ** 2
+                if d <= r2:
+                    best, r2 = (i, j), d
+            if best and best[0] == i:
+                return best
+        return best
+
+    def _inside(self, x, y):
+        order = ([self.sel] if self.sel is not None else []) + list(range(len(self.quads)))
+        for i in order:
+            poly = self.np.array(self.quads[i], self.np.float32)
+            if self.cv2.pointPolygonTest(poly, (float(x), float(y)), False) >= 0:
                 return i
         return None
 
     def _press(self, e):
-        i = self._near(e.x, e.y)
-        if i is not None:
-            self.drag = i
-        elif len(self.pts) < 4:
-            self.pts.append((e.x, e.y))
-            self._redraw()
-            if self.on_change:
-                self.on_change(len(self.pts))
+        hit = self._near(e.x, e.y)
+        if hit:
+            self.sel, self.drag = hit[0], hit
+        else:
+            i = self._inside(e.x, e.y)
+            if i is not None:
+                self.sel = i
+        self._redraw()
         self._loupe(e.x, e.y)
+        if self.on_change:
+            self.on_change()
 
     def _drag(self, e):
-        if self.drag is not None:
-            x = min(max(e.x, 0), self.dw - 1); y = min(max(e.y, 0), self.dh - 1)
-            self.pts[self.drag] = (x, y)
+        if self.drag:
+            x = min(max(e.x, 0), self.dw - 1)
+            y = min(max(e.y, 0), self.dh - 1)
+            i, j = self.drag
+            self.quads[i][j] = (x, y)
             self._redraw()
             self._loupe(x, y)
 
     def _move(self, e):
         self._loupe(e.x, e.y)
-        self.config(cursor="fleur" if self._near(e.x, e.y) is not None else "crosshair")
+        self.config(cursor="fleur" if self._near(e.x, e.y) else "crosshair")
 
-    def reset(self):
-        self.pts = []
+    def add_frame(self):
+        """Nouveau cadre au centre de la vue, sélectionné, à ajuster par ses coins."""
+        cw, ch = self.dw * 0.3, self.dw * 0.3 * 1.4
+        cx, cy = self.dw / 2, self.dh / 2
+        self.quads.append([(cx - cw / 2, cy - ch / 2), (cx + cw / 2, cy - ch / 2),
+                           (cx + cw / 2, cy + ch / 2), (cx - cw / 2, cy + ch / 2)])
+        self.sel = len(self.quads) - 1
         self._redraw()
         if self.on_change:
-            self.on_change(0)
+            self.on_change()
 
-    def _ordered(self):
-        """Coins dans l'ordre haut-gauche, haut-droit, bas-droit, bas-gauche."""
-        import numpy as np
-        p = np.array(self.pts, float)
-        c = p.mean(0)
-        ang = np.arctan2(p[:, 1] - c[1], p[:, 0] - c[0])
-        p = p[np.argsort(ang)]                     # tri autour du centre
-        start = np.argmin(p.sum(1))                # le plus haut-gauche d'abord
-        return np.roll(p, -start, axis=0)
+    def delete_selected(self):
+        if self.sel is not None:
+            del self.quads[self.sel]
+            self.sel = (len(self.quads) - 1) if self.quads else None
+            self._redraw()
+            if self.on_change:
+                self.on_change()
 
     def _redraw(self):
-        self.delete("sel")
-        if len(self.pts) == 4:
-            q = self._ordered()
-            self.create_polygon([c for p in q for c in p], outline=BLUE, fill="",
-                                width=px(2), tags="sel")
-        elif len(self.pts) > 1:
-            self.create_line([c for p in self.pts for c in p], fill=BLUE, width=px(2),
-                             dash=(6, 4), tags="sel")
+        self.delete("cadre")
         r = px(7)
-        for i, (x, y) in enumerate(self.pts):
-            self.create_oval(x - r, y - r, x + r, y + r, fill="white", outline=BLUE,
-                             width=px(2), tags="sel")
+        for i, q in enumerate(self.quads):
+            on = i == self.sel
+            col = BLUE if on else "#86868b"
+            self.create_polygon([c for p in q for c in p], outline=col, fill="",
+                                width=px(3) if on else px(2), tags="cadre")
+            cx = sum(p[0] for p in q) / 4
+            cy = sum(p[1] for p in q) / 4
+            self.create_oval(cx - px(14), cy - px(14), cx + px(14), cy + px(14),
+                             fill=col, outline="white", width=px(2), tags="cadre")
+            self.create_text(cx, cy, text=str(i + 1), fill="white",
+                             font=(None, 12, "bold"), tags="cadre")
+            for (x, y) in q:
+                self.create_oval(x - r, y - r, x + r, y + r, fill="white", outline=col,
+                                 width=px(2), tags="cadre")
+        self.tag_raise("loupe")
 
-    def quad_full(self):
-        """Les 4 coins ordonnés, en pixels de l'image d'origine."""
-        return self._ordered() / self.k
+    def quads_full(self):
+        """Coins de chaque cadre, en pixels de l'image d'origine."""
+        from scanphotos.detect import order_quad
+        return [order_quad(self.np.array(q, self.np.float32) / self.k) for q in self.quads]
 
     # --- loupe ---
     def _loupe(self, x, y):
@@ -321,6 +352,11 @@ class CornerPicker(tk.Canvas):
                                        interpolation=cv2.INTER_LINEAR), cv2.COLOR_BGR2RGB)
         im = Image.fromarray(crop)
         d = ImageDraw.Draw(im)
+        z = self.ls / (2 * half)                    # px loupe par px image
+        for i, q in enumerate(self.quads):          # cadres visibles dans la loupe aussi
+            pts = [((qx / self.k - fx) * z + self.ls / 2, (qy / self.k - fy) * z + self.ls / 2)
+                   for qx, qy in q]
+            d.line(pts + [pts[0]], fill=_hex(BLUE if i == self.sel else "#86868b"), width=2)
         c = self.ls // 2
         for off in (-1, 1):  # croix de visée, contour blanc + trait bleu
             d.line((c + off, 0, c + off, self.ls), fill="white")
