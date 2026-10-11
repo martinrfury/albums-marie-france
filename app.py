@@ -457,33 +457,55 @@ class App(tk.Tk):
 
     # ---------- écran 3 bis : recadrage manuel (4 coins + loupe) ----------
     def screen_recrop(self, scan_path, quads, title, on_done, on_cancel):
-        """Elle clique les 4 coins de la photo sur la planche ; on_done(coins)."""
-        col = self.new_page()
-        self.caption(col)
-        self.text(col, title, "large", pady=(0, px(4)))
-        self.text(col, "Cliquez les 4 coins de la photo. La loupe vous aide à viser ; "
-                       "un coin posé peut être déplacé.", "body", TEXT2, pady=(0, px(12)))
+        """Elle clique les 4 coins de la photo sur la planche ; on_done(coins).
+        Deux colonnes (planche à gauche, consignes et boutons à droite) pour que
+        les boutons restent visibles quelle que soit la hauteur de l'écran."""
+        if self.page:
+            self.page.destroy()
+        page = tk.Frame(self, bg=BG)
+        page.pack(fill="both", expand=True)
+        self.page = page
         img = alb.read_image(scan_path)
-        max_h = max(px(360), self.winfo_screenheight() - px(330))
-        if self.winfo_height() < max_h + px(300):
-            self.geometry(f"{self.winfo_width()}x{min(self.winfo_screenheight() - px(60), max_h + px(300))}")
-        state = tk.Label(col, text="Coins posés : 0 sur 4", font=self.F["small"], fg=TEXT3,
+        side = px(300)
+        # la fenêtre occupe l'écran sans le dépasser (barre de titre, barre des tâches)
+        avail_h = self.winfo_screenheight() - px(150)
+        avail_w = self.winfo_screenwidth() - px(80)
+        max_h = avail_h - px(48)
+        max_w = avail_w - side - px(96)
+        self.geometry(f"{avail_w}x{avail_h}+{px(20)}+{px(20)}")
+
+        right = tk.Frame(page, bg=BG, width=side)
+        left = tk.Frame(page, bg=BG)
+        left.pack(side="left", fill="y", padx=(px(32), px(24)), pady=px(24))
+        right.pack(side="left", fill="y", pady=px(32))
+        state = tk.Label(right, text="Coins posés : 0 sur 4", font=self.F["body"], fg=TEXT2,
                          bg=BG, anchor="w")
-        ok = self.pill(col, "Valider ce cadre", lambda: on_done(picker.quad_full()), full=True)
+        ok = ui.Pill(right, "Valider ce cadre", lambda: on_done(picker.quad_full()),
+                     self.F["btn"], width=side, bg=BG)
 
         def changed(n):
             state.config(text=f"Coins posés : {n} sur 4")
             ok.set_enabled(n == 4)
 
-        picker = ui.CornerPicker(col, img, self.col, max_h, boxes=quads, on_change=changed)
-        picker.pack(pady=(0, px(8)))
-        state.pack(fill="x", pady=(0, px(10)))
+        picker = ui.CornerPicker(left, img, max_w, max_h, boxes=quads, on_change=changed)
+        picker.pack(anchor="n")
+
+        n = self.album.count()
+        tk.Label(right, text=f"{self.album.name}  ·  {plural(n, 'photo')}", font=self.F["small"],
+                 fg=TEXT3, bg=BG, anchor="w").pack(fill="x", pady=(0, px(6)))
+        tk.Label(right, text=title, font=self.F["title"], fg=TEXT, bg=BG, anchor="w",
+                 justify="left", wraplength=side).pack(fill="x", pady=(0, px(10)))
+        tk.Label(right, text="Cliquez les 4 coins de la photo.\n\nLa loupe vous aide à "
+                             "viser. Un coin posé peut être déplacé.",
+                 font=self.F["body"], fg=TEXT2, bg=BG, anchor="w", justify="left",
+                 wraplength=side).pack(fill="x", pady=(0, px(20)))
+        state.pack(fill="x", pady=(0, px(12)))
         ok.pack(pady=(0, px(10)))
         ok.set_enabled(False)
-        row = tk.Frame(col, bg=BG)
-        row.pack()
-        self.pill(row, "Recommencer", picker.reset, kind="secondary").pack(side="left", padx=px(6))
-        self.pill(row, "Annuler", on_cancel, kind="secondary").pack(side="left", padx=px(6))
+        ui.Pill(right, "Recommencer", picker.reset, self.F["body"], kind="secondary",
+                width=side).pack(pady=(0, px(10)))
+        ui.Pill(right, "Annuler", on_cancel, self.F["body"], kind="secondary",
+                width=side).pack()
 
     # ---------- écran 4 : fin ----------
     def screen_done(self):
