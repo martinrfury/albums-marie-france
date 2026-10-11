@@ -15,6 +15,16 @@ Chaque push sur `main` lance GitHub Actions (Windows) : fabrication du .exe,
 autotest du .exe lui-même (`--selftest` : imports, détourage, modèle de visages,
 tous les écrans), puis publication de la version `vN` (N = numéro de fabrication).
 
+## Publier une version (signature)
+La fabrication dépose le .exe en **brouillon**, invisible pour le logiciel installé.
+Sur le Mac de Martin : `.venv/bin/python scripts/signer_version.py` vérifie que le
+brouillon vient du commit en ligne et d'une fabrication réussie, signe
+(version + SHA-256 + taille, Ed25519) avec la clé privée
+`~/.config/albums-marie-france/cle_signature_privee.pem` (jamais dans le dépôt), puis
+publie. Le logiciel refuse toute version dont la signature, la version ou
+l'empreinte ne correspondent pas. **Sans cette clé, plus aucune mise à jour possible**
+(il faudrait réinstaller à la main une version portant une nouvelle clé publique).
+
 ## Mises à jour
 Au lancement, le logiciel compare sa version à la dernière publiée ; si elle est
 plus récente, il la télécharge, se remplace et redémarre (seulement avant

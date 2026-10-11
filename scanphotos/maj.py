@@ -1,10 +1,14 @@
 """Mise à jour automatique depuis les versions publiées sur GitHub.
 
-Au lancement, le .exe compare son numéro de version au dernier publié. Si une
-version plus récente existe, il la télécharge, puis un petit script remplace le
-.exe une fois le logiciel fermé et le relance. Tout échec (pas d'Internet,
-téléchargement incomplet) laisse simplement l'ancienne version démarrer.
+Au lancement, le .exe compare son numéro de version au dernier publié. Une
+version n'est retenue que si son fichier signature.txt est signé par la clé de
+Martin (voir signature.py) et couvre ce numéro de version ; le .exe téléchargé
+doit ensuite avoir exactement l'empreinte SHA-256 et la taille signées. Un petit
+script remplace alors le .exe une fois le logiciel fermé et le relance. Tout
+échec (pas d'Internet, signature absente ou fausse, fichier différent) laisse
+simplement l'ancienne version démarrer.
 """
+import hashlib
 import json
 import logging
 import os
@@ -13,10 +17,12 @@ import sys
 import tempfile
 import urllib.request
 
+from scanphotos import signature
 from scanphotos.version import VERSION
 
 DEPOT = "martinrfury/albums-marie-france"
 API = f"https://api.github.com/repos/{DEPOT}/releases/latest"
+TELECHARGEMENTS = f"https://github.com/{DEPOT}/releases/download/"
 log = logging.getLogger("albums")
 
 
@@ -25,50 +31,68 @@ def installed():
     return getattr(sys, "frozen", False) and VERSION > 0
 
 
-def latest():
-    """(version, url_du_exe, taille) de la dernière version publiée, ou None."""
-    req = urllib.request.Request(API, headers={"Accept": "application/vnd.github+json",
+def _get(url, timeout=10):
+    if not url.startswith(("https://api.github.com/", TELECHARGEMENTS)):
+        raise signature.SignatureInvalide(f"adresse inattendue : {url}")
+    req = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json",
                                                "User-Agent": "albums-marie-france"})
-    with urllib.request.urlopen(req, timeout=6) as r:
+    return urllib.request.urlopen(req, timeout=timeout)
+
+
+def latest():
+    """(version, url_du_exe, taille, sha256) de la dernière version publiée ET
+    correctement signée, ou None."""
+    with _get(API, 6) as r:
         rel = json.load(r)
     tag = rel.get("tag_name", "")
-    exe = [a for a in rel.get("assets", []) if a["name"].lower().endswith(".exe")]
-    if not tag.startswith("v") or not tag[1:].isdigit() or not exe:
+    assets = {a["name"]: a for a in rel.get("assets", [])}
+    exe = [a for n, a in assets.items() if n.lower().endswith(".exe")]
+    if not tag.startswith("v") or not tag[1:].isdigit() or len(exe) != 1 \
+            or "signature.txt" not in assets:
+        log.info("Version %s ignorée : pas de .exe signé", tag or "?")
         return None
-    return int(tag[1:]), exe[0]["browser_download_url"], exe[0]["size"]
+    with _get(assets["signature.txt"]["browser_download_url"]) as r:
+        version, sha, size = signature.verifier(r.read(4096).decode("ascii", "replace"))
+    if version != int(tag[1:]) or size != exe[0]["size"]:
+        raise signature.SignatureInvalide(f"la signature ne couvre pas {tag}")
+    return version, exe[0]["browser_download_url"], size, sha
 
 
 def check():
-    """Version plus récente disponible -> (version, url, taille), sinon None."""
+    """Version plus récente, signée, disponible -> (version, url, taille, sha256)."""
     if not installed():
         return None
     try:
         info = latest()
+    except signature.SignatureInvalide as e:
+        log.warning("Mise à jour REFUSÉE : %s", e)
+        return None
     except Exception as e:  # noqa: BLE001 — pas d'Internet : on démarre normalement
         log.info("Vérification de mise à jour impossible : %s", e)
         return None
     if info and info[0] > VERSION:
-        log.info("Mise à jour disponible : v%s (installée v%s)", info[0], VERSION)
+        log.info("Mise à jour signée disponible : v%s (installée v%s)", info[0], VERSION)
         return info
     return None
 
 
-def download(url, size, progress=None):
-    """Télécharge le nouveau .exe à côté de l'actuel ; renvoie son chemin."""
+def download(url, size, sha, progress=None):
+    """Télécharge le nouveau .exe à côté de l'actuel et vérifie qu'il est bien
+    celui qui a été signé ; renvoie son chemin."""
     dest = sys.executable + ".nouveau"
-    req = urllib.request.Request(url, headers={"User-Agent": "albums-marie-france"})
+    h = hashlib.sha256()
     done = 0
-    with urllib.request.urlopen(req, timeout=30) as r, open(dest, "wb") as f:
+    with _get(url, 30) as r, open(dest, "wb") as f:
         while chunk := r.read(1 << 16):
             f.write(chunk)
+            h.update(chunk)
             done += len(chunk)
             if progress:
                 progress(done / size if size else 0)
-    with open(dest, "rb") as f:
-        head = f.read(2)
-    if done != size or head != b"MZ":  # incomplet ou pas un programme Windows
+    if done != size or h.hexdigest() != sha:
         os.remove(dest)
-        raise OSError(f"fichier reçu invalide ({done}/{size} octets)")
+        raise signature.SignatureInvalide(
+            f"le fichier reçu ne correspond pas à la signature ({done}/{size} octets)")
     return dest
 
 

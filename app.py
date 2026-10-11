@@ -96,7 +96,7 @@ class App(tk.Tk):
             self.screen_update(info)
 
     def screen_update(self, info):
-        version, url, size = info
+        version, url, size, sha = info
         col = self.new_page()
         self.text(col, "Mise à jour", "large", pady=(0, px(4)))
         self.text(col, "Une nouvelle version du logiciel s'installe. Il va redémarrer tout "
@@ -119,7 +119,7 @@ class App(tk.Tk):
             maj.install_and_restart(res)
             self.destroy()
 
-        self.run_bg(lambda: maj.download(url, size, progress), done)
+        self.run_bg(lambda: maj.download(url, size, sha, progress), done)
 
     # ---------- mise en page ----------
     def new_page(self):
@@ -530,7 +530,9 @@ def selftest():
     import tempfile
     import numpy as np
     from zeroconf import Zeroconf
+    from scanphotos import signature
     Zeroconf().close()
+    signature.autotest()                             # vérification Ed25519 embarquée
     planche = np.full((4217, 2550, 3), 245, np.uint8)
     planche[400:1700, 300:2200] = (40, 90, 160)      # une photo paysage
     planche[2100:3900, 600:1800] = (60, 140, 70)     # une photo portrait
@@ -575,7 +577,7 @@ def selftest():
     assert album.count() == 2
     app.screen_done()
     app.run_bg = lambda *a: None
-    app.screen_update((VERSION + 1, "https://example.invalid/x.exe", 1))  # écran seul
+    app.screen_update((VERSION + 1, "https://example.invalid/x.exe", 1, ""))  # écran seul
     app.update()
     app.destroy()
 
