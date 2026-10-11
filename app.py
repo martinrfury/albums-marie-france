@@ -317,7 +317,7 @@ class App(tk.Tk):
         self.text(col, "Posez vos photos", "large", pady=(0, px(20)))
         card = ui.Card(col, self.col)
         card.pack(pady=(0, px(20)))
-        steps = ["Jusqu'à 4 photos sur la vitre",
+        steps = ["Autant de photos que la vitre en contient",
                  "1 cm d'écart entre elles",
                  "Le haut des photos vers le fond du scanner",
                  "Fermez le capot"]
